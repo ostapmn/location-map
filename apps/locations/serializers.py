@@ -15,7 +15,7 @@ class LocationSerializer(serializers.ModelSerializer):
     avg_rating = serializers.SerializerMethodField()
     reviews_count = serializers.IntegerField(read_only=True)
     views_7d = serializers.IntegerField(read_only=True)
-    popularity = serializers.FloatField(read_only=True)
+    popularity = serializers.SerializerMethodField()
 
     class Meta:
         model = Location
@@ -30,3 +30,7 @@ class LocationSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.FloatField(allow_null=True))
     def get_avg_rating(self, obj):
         return None if obj.avg_rating is None else round(obj.avg_rating, 2)
+
+    @extend_schema_field(serializers.FloatField())
+    def get_popularity(self, obj):
+        return round(obj.popularity, 2)

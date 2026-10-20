@@ -78,7 +78,7 @@ docker compose exec web python manage.py seed_demo --reset   # видалити 
 docker compose exec web python manage.py test
 ```
 
-Очікується: `Ran 51 tests ... OK`. Тести використовують пам'ять замість Redis і не чіпають ваші дані.
+Очікується: `Ran 57 tests ... OK`. Тести використовують пам'ять замість Redis і не чіпають ваші дані.
 
 Окремі модулі:
 
@@ -98,7 +98,7 @@ docker compose exec web python manage.py test apps.reviews
 | `apps.locations.tests.test_filters` | пошук, фільтри, сортування, пагінація |
 | `apps.locations.tests.test_cache` | кеш і його інвалідація |
 | `apps.locations.tests.test_export` | експорт CSV/JSON |
-| `apps.reviews` | відгуки, дубль, голоси |
+| `apps.reviews` | відгуки, дубль, голоси, паралельні дублі (без `500`) |
 | `apps.locations.tests.test_seed` | команда `seed_demo`: 30 локацій, ідемпотентність, `--reset` |
 
 ## 3. Ручне тестування: налаштування
@@ -166,11 +166,25 @@ curl -s -b /tmp/bob.jar -X POST $B/auth/logout/ -w '  [HTTP %{http_code}]\n'
 
 ```bash
 curl -s $B/categories/                                  # гість читає: 200, порожньо
-call /tmp/admin.jar POST /categories/ -d '{"name":"Parks"}'   # 201, id=1
-call /tmp/admin.jar POST /categories/ -d '{"name":"Cafes"}'   # 201, id=2
+call /tmp/admin.jar POST /categories/ -d '{"name":"Parks"}'   # 201
+call /tmp/admin.jar POST /categories/ -d '{"name":"Cafes"}'   # 201
 call /tmp/alice.jar POST /categories/ -d '{"name":"Bars"}'    # 403 не адмін
-call /tmp/admin.jar PATCH /categories/1/ -d '{"name":"Parks & Gardens"}'   # 200
-call /tmp/admin.jar PATCH /categories/1/ -d '{"name":"Parks"}'             # повертаємо назву
+```
+
+**Збережіть id категорій у змінні.** Далі гайд використовує `$PARKS` і `$CAFES`, тож він працює і на чистій базі
+(id 1 і 2), і на базі з демо-даними (id інші):
+
+```bash
+cat_id(){ curl -s "$B/categories/" | python3 -c 'import sys,json;n=sys.argv[1];print(next(c["id"] for c in json.load(sys.stdin)["results"] if c["name"]==n))' "$1"; }
+export PARKS=$(cat_id Parks) CAFES=$(cat_id Cafes)
+echo "PARKS=$PARKS CAFES=$CAFES"
+```
+
+Далі:
+
+```bash
+call /tmp/admin.jar PATCH /categories/$PARKS/ -d '{"name":"Parks & Gardens"}'   # 200
+call /tmp/admin.jar PATCH /categories/$PARKS/ -d '{"name":"Parks"}'             # повертаємо назву
 ```
 
 Видалення категорії, що має локації, дає `400` (перевіряється у [розділі 6](#6-локації)).
@@ -187,16 +201,24 @@ call /tmp/guest.jar POST /locations/ -d '{"title":"x"}'
 **Alice створює дві локації** (автор береться із сесії, а не з тіла запиту):
 
 ```bash
-call /tmp/alice.jar POST /locations/ -d '{"title":"Central Park","description":"Green and quiet","category":1,"address":"Kyiv","latitude":"50.45","longitude":"30.52"}'
-call /tmp/alice.jar POST /locations/ -d '{"title":"Blue Cafe","description":"Great coffee near the park","category":2,"address":"Lviv","latitude":"49.84","longitude":"24.03"}'
+call /tmp/alice.jar POST /locations/ -d '{"title":"Central Park","description":"Green and quiet","category":'$PARKS',"address":"Kyiv","latitude":"50.45","longitude":"30.52"}'
+call /tmp/alice.jar POST /locations/ -d '{"title":"Blue Cafe","description":"Great coffee near the park","category":'$CAFES',"address":"Lviv","latitude":"49.84","longitude":"24.03"}'
 ```
-Очікується `201`, `"author":2`, `"avg_rating":null`, `"popularity":0.0`.
+Очікується `201`, `"avg_rating":null`, `"popularity":0.0`.
+
+**Збережіть id локацій у змінні** (далі гайд використовує `$LOC1` і `$LOC2`, тож id не обов'язково 1 і 2):
+
+```bash
+loc_id(){ curl -s -G "$B/locations/" --data-urlencode "search=$1" | python3 -c 'import sys,json;print(json.load(sys.stdin)["results"][0]["id"])'; }
+export LOC1=$(loc_id "Central Park") LOC2=$(loc_id "Blue Cafe")
+echo "LOC1=$LOC1 LOC2=$LOC2"
+```
 
 **Валідація координат:**
 
 ```bash
-call /tmp/alice.jar POST /locations/ -d '{"title":"Bad","description":"d","category":1,"address":"a","latitude":"95","longitude":"30"}'
-call /tmp/alice.jar POST /locations/ -d '{"title":"Bad","description":"d","category":1,"address":"a","latitude":"10","longitude":"181"}'
+call /tmp/alice.jar POST /locations/ -d '{"title":"Bad","description":"d","category":'$PARKS',"address":"a","latitude":"95","longitude":"30"}'
+call /tmp/alice.jar POST /locations/ -d '{"title":"Bad","description":"d","category":'$PARKS',"address":"a","latitude":"10","longitude":"181"}'
 call /tmp/alice.jar POST /locations/ -d '{"title":"Bad","description":"d","category":999,"address":"a","latitude":"10","longitude":"10"}'
 ```
 Очікується `400`: широта ≤ 90, довгота ≤ 180, неіснуюча категорія.
@@ -204,25 +226,25 @@ call /tmp/alice.jar POST /locations/ -d '{"title":"Bad","description":"d","categ
 **Права на редагування:**
 
 ```bash
-call /tmp/bob.jar   PATCH /locations/1/ -d '{"title":"Hacked"}'                  # 403 чужа
-call /tmp/alice.jar PATCH /locations/1/ -d '{"title":"Central Park v2"}'         # 200 власник
-call /tmp/admin.jar PATCH /locations/1/ -d '{"title":"Central Park"}'            # 200 адмін
-call /tmp/bob.jar   DELETE /locations/1/                                          # 403
+call /tmp/bob.jar   PATCH /locations/$LOC1/ -d '{"title":"Hacked"}'                  # 403 чужа
+call /tmp/alice.jar PATCH /locations/$LOC1/ -d '{"title":"Central Park v2"}'         # 200 власник
+call /tmp/admin.jar PATCH /locations/$LOC1/ -d '{"title":"Central Park"}'            # 200 адмін
+call /tmp/bob.jar   DELETE /locations/$LOC1/                                          # 403
 ```
 
 **Категорія з локаціями не видаляється:**
 
 ```bash
-call /tmp/admin.jar DELETE /categories/1/
+call /tmp/admin.jar DELETE /categories/$PARKS/
 ```
 Очікується `400 Category has locations and cannot be deleted.`
 
-**Soft delete** (Cafe, id=2):
+**Soft delete** (Blue Cafe, `$LOC2`):
 
 ```bash
-call /tmp/alice.jar DELETE /locations/2/        # 204
-curl -s $B/locations/2/ -w '  [HTTP %{http_code}]\n'      # 404
-curl -s $B/locations/ | python3 -c 'import sys,json;print(json.load(sys.stdin)["count"])'   # 1
+call /tmp/alice.jar DELETE /locations/$LOC2/        # 204
+curl -s $B/locations/$LOC2/ -w '  [HTTP %{http_code}]\n'      # 404
+curl -s $B/locations/ | python3 -c 'import sys,json;print(json.load(sys.stdin)["count"])'   # на 1 менше, ніж до видалення
 ```
 
 Запис лишається в БД з `is_deleted=true`:
@@ -230,49 +252,58 @@ curl -s $B/locations/ | python3 -c 'import sys,json;print(json.load(sys.stdin)["
 ```bash
 docker compose exec web python manage.py shell -c "
 from apps.locations.models import Location
-print([(l.id, l.title, l.is_deleted) for l in Location.all_objects.all()])"
+print([(l.id, l.title, l.is_deleted) for l in Location.all_objects.filter(title__in=['Blue Cafe','Central Park'])])"
 ```
-Очікується `[(2, 'Blue Cafe', True), (1, 'Central Park', False)]` (видно також в `/admin/`).
+Очікується, що Blue Cafe має `is_deleted=True`, а Central Park `False` (видно також в `/admin/`).
 
-> Щоб подальші сценарії мали дві локації, відновіть Cafe:
-> ```bash
-> docker compose exec web python manage.py shell -c "
-> from apps.locations.models import Location; Location.all_objects.filter(pk=2).update(is_deleted=False)"
-> ```
+**Обов'язково відновіть Blue Cafe**, бо далі на неї пишуться відгуки:
+
+```bash
+docker compose exec web python manage.py shell -c "
+from apps.locations.models import Location; Location.all_objects.filter(pk=$LOC2).update(is_deleted=False)"
+curl -s $B/locations/$LOC2/ -o /dev/null -w '%{http_code}\n'     # 200
+```
 
 ## 7. Відгуки і голоси
 
 ```bash
-call /tmp/bob.jar POST /locations/1/reviews/ -d '{"rating":5,"comment":"Great"}'    # 201
-call /tmp/bob.jar POST /locations/1/reviews/ -d '{"rating":4}'                      # 400 дубль
-call /tmp/bob.jar POST /locations/2/reviews/ -d '{"rating":6}'                      # 400 рейтинг > 5
-call /tmp/bob.jar POST /locations/2/reviews/ -d '{"rating":0}'                      # 400 рейтинг < 1
-call /tmp/alice.jar POST /locations/1/reviews/ -d '{"rating":3,"comment":"ok"}'     # 201
-call /tmp/guest.jar POST /locations/1/reviews/ -d '{"rating":5}'                    # 403
+call /tmp/bob.jar POST /locations/$LOC1/reviews/ -d '{"rating":5,"comment":"Great"}'    # 201
+call /tmp/bob.jar POST /locations/$LOC1/reviews/ -d '{"rating":4}'                      # 400 дубль
+call /tmp/bob.jar POST /locations/$LOC2/reviews/ -d '{"rating":6}'                      # 400 рейтинг > 5
+call /tmp/bob.jar POST /locations/$LOC2/reviews/ -d '{"rating":0}'                      # 400 рейтинг < 1
+call /tmp/alice.jar POST /locations/$LOC1/reviews/ -d '{"rating":3,"comment":"ok"}'     # 201
+call /tmp/guest.jar POST /locations/$LOC1/reviews/ -d '{"rating":5}'                    # 403
 call /tmp/bob.jar POST /locations/999/reviews/ -d '{"rating":5}'                    # 404
 ```
 Для дубля очікується `{"detail":"You have already reviewed this location."}`.
 
+Збережіть id відгуку bob (`$REV1`):
+
+```bash
+export REV1=$(curl -s "$B/locations/$LOC1/reviews/" | python3 -c 'import sys,json;print(next(r["id"] for r in json.load(sys.stdin)["results"] if r["author_username"]=="bob"))')
+echo "REV1=$REV1"
+```
+
 **Список відгуків** (з лічильниками голосів):
 
 ```bash
-curl -s $B/locations/1/reviews/ | python3 -m json.tool
+curl -s $B/locations/$LOC1/reviews/ | python3 -m json.tool
 ```
 
 **Редагування відгуку:**
 
 ```bash
-call /tmp/alice.jar PATCH /reviews/1/ -d '{"rating":1}'    # 403 чужий відгук
-call /tmp/bob.jar   PATCH /reviews/1/ -d '{"rating":5}'    # 200
+call /tmp/alice.jar PATCH /reviews/$REV1/ -d '{"rating":1}'    # 403 чужий відгук
+call /tmp/bob.jar   PATCH /reviews/$REV1/ -d '{"rating":5}'    # 200
 ```
 
 **Голоси** (like = 1, dislike = -1, один голос на користувача):
 
 ```bash
-call /tmp/alice.jar POST /reviews/1/vote/ -d '{"value":1}'    # 200, "likes":1
-call /tmp/alice.jar POST /reviews/1/vote/ -d '{"value":-1}'   # 400 вже голосували
-call /tmp/alice.jar POST /reviews/1/vote/ -d '{"value":5}'    # 400 некоректне значення
-call /tmp/guest.jar POST /reviews/1/vote/ -d '{"value":1}'    # 403
+call /tmp/alice.jar POST /reviews/$REV1/vote/ -d '{"value":1}'    # 200, "likes":1
+call /tmp/alice.jar POST /reviews/$REV1/vote/ -d '{"value":-1}'   # 400 вже голосували
+call /tmp/alice.jar POST /reviews/$REV1/vote/ -d '{"value":5}'    # 400 некоректне значення
+call /tmp/guest.jar POST /reviews/$REV1/vote/ -d '{"value":1}'    # 403
 ```
 
 ## 8. Рейтинг, популярність, перегляди
@@ -280,7 +311,7 @@ call /tmp/guest.jar POST /reviews/1/vote/ -d '{"value":1}'    # 403
 Після відгуків bob=5 і alice=3 у Central Park:
 
 ```bash
-curl -s $B/locations/1/ | python3 -c 'import sys,json;d=json.load(sys.stdin);print({k:d[k] for k in ("avg_rating","reviews_count","views_7d","popularity")})'
+curl -s $B/locations/$LOC1/ | python3 -c 'import sys,json;d=json.load(sys.stdin);print({k:d[k] for k in ("avg_rating","reviews_count","views_7d","popularity")})'
 ```
 Очікується: `{'avg_rating': 4.0, 'reviews_count': 2, 'views_7d': 1, 'popularity': 10.1}`
 
@@ -303,7 +334,7 @@ docker compose exec redis redis-cli -n 1 ttl ':1:view:1:ip192.168.65.1'
 **Залогінений рахується окремо від гостя:**
 
 ```bash
-curl -s -b /tmp/bob.jar $B/locations/1/ | python3 -c 'import sys,json;print(json.load(sys.stdin)["views_7d"])'
+curl -s -b /tmp/bob.jar $B/locations/$LOC1/ | python3 -c 'import sys,json;print(json.load(sys.stdin)["views_7d"])'
 ```
 Очікується `2`.
 
@@ -311,7 +342,7 @@ curl -s -b /tmp/bob.jar $B/locations/1/ | python3 -c 'import sys,json;print(json
 
 ```bash
 docker compose exec redis redis-cli -n 1 flushdb
-curl -s $B/locations/1/ | python3 -c 'import sys,json;print(json.load(sys.stdin)["views_7d"])'   # 3
+curl -s $B/locations/$LOC1/ | python3 -c 'import sys,json;print(json.load(sys.stdin)["views_7d"])'   # 3
 ```
 
 **Список не рахує перегляди:** `GET /locations/` не змінює `views_7d`.
@@ -345,30 +376,55 @@ print([f.name for f in __import__('apps.locations.models', fromlist=['Location']
 q(){ curl -s "$B/locations/?$1" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d if "results" not in d else (d["count"],[(r["title"],r["avg_rating"],r["popularity"]) for r in d["results"]]))'; }
 ```
 
+Значення нижче отримано на чистій базі після розділів 4-8 і `seed_demo` (демо-дані детерміновані). Якщо ви
+пропустили розділи 4-8, числа можуть відрізнятися, але правила ті самі.
+
 | Запит | Очікування |
 |---|---|
 | `q 'search=coffee'` | 1 запис: Blue Cafe (шукає в назві й описі, без урахування регістру) |
-| `q 'search=park'` | 2 записи: назва Central Park та опис Blue Cafe |
-| `q 'category=2'` | лише Blue Cafe |
-| `q 'author=2'` | локації alice (id автора дивіться у відповіді) |
-| `q 'min_rating=4'` | лише Central Park (4.0) |
-| `q 'max_rating=3'` | порожньо (Blue Cafe без відгуків не потрапляє) |
-| `q 'ordering=-popularity'` | Central Park, потім Blue Cafe |
-| `q 'ordering=popularity'` | Blue Cafe, потім Central Park |
-| `q 'ordering=-created_at'` | новіші першими |
-| `q 'ordering=-avg_rating'` | локації без відгуків завжди в кінці |
-| `q 'ordering=title'` | `400` (дозволено лише `created_at`, `avg_rating`, `popularity`) |
-| `q 'min_rating=abc'` | `400` |
-| `q 'search=park&category=1&min_rating=3'` | фільтри комбінуються |
+| `q 'search=park'` | 2 записи: Central Park (у назві) і Blue Cafe (в описі) |
+| `q 'search=парк'` | 5 записів із кирилицею (регістр теж не важливий) |
+| `q "category=$CAFES"` | лише Blue Cafe |
+| `q "category=$PARKS"` | лише Central Park |
+| `q 'author=2'` | 2 локації alice (id автора можна побачити у відповіді) |
+| `q 'min_rating=4'` | 11 записів, у всіх `avg_rating >= 4`; локації без відгуків не потрапляють |
+| `q 'max_rating=3'` | 6 записів, у всіх `avg_rating <= 3` |
+| `q 'ordering=-popularity'` | першим «Кафе «Старе місто»» (15.7), далі за спаданням |
+| `q 'ordering=popularity'` | першими найменш популярні (0.0), далі за зростанням |
+| `q 'ordering=-created_at'` | найновіші першими («Парк «Нивки»» серед демо-даних) |
+| `q 'ordering=-avg_rating'` | спочатку 5.0, локації без відгуків в кінці |
+| `q 'ordering=avg_rating'` | спочатку найнижчий рейтинг (2.0), локації без відгуків знову в кінці |
+| `q 'ordering=title'` | `400`: `Select a valid choice` (дозволено лише `created_at`, `avg_rating`, `popularity`) |
+| `q 'min_rating=abc'` | `400`: `Enter a number.` |
+| `q "search=park&category=$PARKS&min_rating=3"` | 1 запис (Central Park): фільтри комбінуються |
 
 **Пагінація** (10 на сторінку). Створіть 12 локацій:
 
 ```bash
-for i in $(seq 1 12); do call /tmp/alice.jar POST /locations/ -d "{\"title\":\"Extra $i\",\"description\":\"d\",\"category\":1,\"address\":\"a\",\"latitude\":\"1\",\"longitude\":\"1\"}" >/dev/null; done
-curl -s "$B/locations/" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["count"],len(d["results"]),d["next"])'
-curl -s "$B/locations/?page=2" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d["results"]),d["previous"])'
+for i in $(seq 1 12); do call /tmp/alice.jar POST /locations/ -d "{\"title\":\"Extra $i\",\"description\":\"d\",\"category\":$PARKS,\"address\":\"a\",\"latitude\":\"1\",\"longitude\":\"1\"}" >/dev/null; done
+curl -s "$B/locations/" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("count",d["count"],"on page",len(d["results"]),"next",d["next"],"prev",d["previous"])'
+curl -s "$B/locations/?page=2" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("on page",len(d["results"]),"next",d["next"],"prev",d["previous"])'
+curl -s "$B/locations/?page=99" -w '  [HTTP %{http_code}]\n'
 ```
-Очікується: `14 10 http://.../?page=2`, потім `4 http://.../locations/`.
+Очікується: `count` = було + 12 (на демо-даних 32 + 12 = 44), на сторінці 10 записів, `next` вказує на `?page=2`,
+`previous` порожній на першій сторінці. На останній сторінці лишок записів і `next: null`.
+Неіснуюча сторінка дає `404 Invalid page.`
+
+Сторінки не перетинаються (кожен запис рівно один раз), навіть при сортуванні за популярністю, де багато однакових значень:
+
+```bash
+python3 - <<'EOF'
+import json, urllib.request
+ids, page = [], 1
+while True:
+    d = json.load(urllib.request.urlopen(f"http://localhost:8000/api/locations/?ordering=-popularity&page={page}"))
+    ids += [r["id"] for r in d["results"]]
+    if not d["next"]: break
+    page += 1
+print("total", len(ids), "unique", len(set(ids)))
+EOF
+```
+Очікується однакові числа `total` і `unique`.
 
 ## 10. Кеш списку
 
@@ -384,20 +440,20 @@ docker compose exec redis redis-cli -n 1 --scan --pattern '*locations:*'
 ```bash
 docker compose exec redis redis-cli -n 1 ttl ":1:locations:list:v1:<хеш із попередньої команди>"
 ```
-Очікується число до `300`.
+Очікується `300` (секунд).
 
 **Окремі ключі для різних параметрів:**
 
 ```bash
 curl -s -o /dev/null "$B/locations/?search=park"
-docker compose exec redis redis-cli -n 1 --scan --pattern '*locations:list:*'    # тепер їх два
+docker compose exec redis redis-cli -n 1 --scan --pattern '*locations:list:*'    # тепер їх два (по одному на кожну комбінацію параметрів)
 ```
 
 **Інвалідація.** Запам'ятайте версію, змініть дані, перевірте:
 
 ```bash
 docker compose exec redis redis-cli -n 1 get ':1:locations:version'
-call /tmp/admin.jar PATCH /locations/1/ -d '{"title":"Central Park (cache test)"}' >/dev/null
+call /tmp/admin.jar PATCH /locations/$LOC1/ -d '{"title":"Central Park (cache test)"}' >/dev/null
 docker compose exec redis redis-cli -n 1 get ':1:locations:version'    # змінилась на велике число
 curl -s $B/locations/ | python3 -c 'import sys,json;print([r["title"] for r in json.load(sys.stdin)["results"]])'
 ```
@@ -411,6 +467,12 @@ curl -s $B/locations/ | python3 -c 'import sys,json;print([r["title"] for r in j
 | Видалення локації | `call /tmp/alice.jar DELETE /locations/<id>/` |
 | Новий відгук | `call /tmp/bob.jar POST /locations/<id>/reviews/ -d '{"rating":4}'` (рейтинг у списку оновиться) |
 | Зміна/видалення відгуку | `call /tmp/bob.jar PATCH /reviews/<id>/ -d '{"rating":2}'` |
+
+**Після зміни коду відповіді API очищайте кеш**, бо старі відповіді живуть до 5 хвилин:
+
+```bash
+docker compose exec redis redis-cli -n 1 flushdb
+```
 
 **Що кеш НЕ скидає:** перегляди (`GET /locations/<id>/`) і голоси. Тому `views_7d` у списку може відставати до 5 хвилин, а в деталях завжди точний. Це свідоме рішення.
 
@@ -431,14 +493,14 @@ curl -s -D- -o /dev/null "$B/locations/export/?format=csv" | grep -i content-
 curl -OJ "$B/locations/export/?format=csv"      # locations.csv
 curl -OJ "$B/locations/export/?format=json"     # locations.json
 ```
-Відкрийте файли: кирилиця читається, категорія і автор показані назвою.
+Відкрийте файли: кирилиця читається, категорія і автор показані назвою. Видалені (soft delete) локації в експорті відсутні.
 
 **Ті самі фільтри, що й у списку, без пагінації:**
 
 ```bash
-curl -s "$B/locations/export/?format=csv&min_rating=4"                       # лише Central Park
+curl -s "$B/locations/export/?format=csv&min_rating=4" | wc -l                # рядків = кількість у списку з min_rating=4, плюс 1 заголовок
 curl -s "$B/locations/export/?format=json&ordering=-popularity" | head -c 300
-curl -s "$B/locations/export/?format=csv" | wc -l                            # усі записи + 1 рядок заголовка (>10)
+curl -s "$B/locations/export/?format=csv" | wc -l                            # усі записи + 1 заголовок (більше 10, тобто без пагінації)
 ```
 
 **Помилки:**
@@ -451,7 +513,7 @@ curl -s "$B/locations/export/?min_rating=abc" -w '  [HTTP %{http_code}]\n'    # 
 **Захист від CSV-ін'єкцій:** назва, що починається з `=`, експортується з апострофом.
 
 ```bash
-call /tmp/alice.jar POST /locations/ -d '{"title":"=HYPERLINK(1)","description":"d","category":1,"address":"a","latitude":"1","longitude":"1"}' >/dev/null
+call /tmp/alice.jar POST /locations/ -d '{"title":"=HYPERLINK(1)","description":"d","category":'$PARKS',"address":"a","latitude":"1","longitude":"1"}' >/dev/null
 curl -s "$B/locations/export/?format=csv" | grep HYPERLINK
 ```
 Очікується `'=HYPERLINK(1)`.
@@ -470,7 +532,7 @@ call /tmp/guest.jar POST /auth/password-reset/ -d '{"email":"nobody@example.com"
 ```bash
 docker compose logs web | grep -E "uid:|token:" | tail -2
 ```
-Очікується щось на кшталт `uid: Mw` та `token: dgqv89-56df...`.
+Очікується `Subject: Password reset`, `To: bob@example.com`, `uid: Mw` (у вас може бути інший), `token: ...`. Для `nobody@example.com` листа немає.
 
 Крок 3: підтвердження. Підставте свої значення:
 
@@ -479,6 +541,8 @@ call /tmp/guest.jar POST /auth/password-reset/confirm/ -d '{"uid":"Mw","token":"
 call /tmp/guest.jar POST /auth/password-reset/confirm/ -d '{"uid":"Mw","token":"<token>","new_password":"Other-pass-8888"}'    # 400 токен одноразовий
 call /tmp/guest.jar POST /auth/password-reset/confirm/ -d '{"uid":"Mw","token":"bad","new_password":"Bob-new-pass-777"}'       # 400
 ```
+
+Слабкий новий пароль відхиляється (`400` зі списком вимог).
 
 Крок 4: старий пароль більше не діє, новий працює:
 

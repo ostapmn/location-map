@@ -75,6 +75,21 @@ class ExportTests(APITestCase):
         self.assertEqual(self.client.get(URL + "?format=xml").status_code, 400)
         self.assertEqual(self.client.get(URL + "?min_rating=abc").status_code, 400)
 
+    def test_csv_round_trips_commas_quotes_and_newlines(self):
+        tricky = 'He said "hi", then left\nnext line; end'
+        self.make(tricky, self.parks)
+        resp = self.client.get(URL + "?format=csv")
+        rows = list(csv.DictReader(io.StringIO(resp.content.decode("utf-8"))))
+        self.assertIn(tricky, [r["title"] for r in rows])
+
+    def test_csv_escapes_all_formula_prefixes(self):
+        for prefix in ("=", "+", "-", "@"):
+            self.make(f"{prefix}cmd", self.parks)
+        rows = list(csv.DictReader(io.StringIO(self.client.get(URL + "?format=csv").content.decode("utf-8"))))
+        titles = [r["title"] for r in rows]
+        for prefix in ("=", "+", "-", "@"):
+            self.assertIn(f"'{prefix}cmd", titles)
+
     def test_csv_formula_injection_escaped(self):
         self.make("=HYPERLINK(1)", self.parks)
         body = self.client.get(URL + "?format=csv").content.decode()

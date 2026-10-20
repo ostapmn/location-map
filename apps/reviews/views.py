@@ -1,3 +1,4 @@
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
@@ -34,9 +35,12 @@ class LocationReviewViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, view
 
     def perform_create(self, serializer):
         location = self.get_location()
-        if Review.objects.filter(location=location, author=self.request.user).exists():
+        # The unique constraint is the source of truth: a check-then-insert would race under concurrent requests.
+        try:
+            with transaction.atomic():
+                serializer.save(location=location, author=self.request.user)
+        except IntegrityError:
             raise ValidationError({"detail": "You have already reviewed this location."})
-        serializer.save(location=location, author=self.request.user)
 
 
 class ReviewViewSet(
@@ -57,12 +61,14 @@ class ReviewViewSet(
         review = self.get_object()
         serializer = VoteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        if ReviewVote.objects.filter(review=review, user=request.user).exists():
+        try:
+            with transaction.atomic():
+                ReviewVote.objects.create(
+                    review=review, user=request.user, value=serializer.validated_data["value"]
+                )
+        except IntegrityError:
             return Response(
                 {"detail": "You have already voted on this review."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        ReviewVote.objects.create(
-            review=review, user=request.user, value=serializer.validated_data["value"]
-        )
         return Response(ReviewSerializer(self.get_object()).data)

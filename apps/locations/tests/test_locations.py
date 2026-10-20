@@ -41,6 +41,17 @@ class LocationApiTests(APITestCase):
             resp = self.client.post("/api/locations/", {**self.payload, field: value})
             self.assertEqual(resp.status_code, 400, (field, value))
 
+    def test_boundary_coordinates_are_accepted(self):
+        self.client.force_login(self.owner)
+        for lat, lng in [("90", "180"), ("-90", "-180"), ("0", "0"), ("-0.000001", "179.999999")]:
+            resp = self.client.post("/api/locations/", {**self.payload, "latitude": lat, "longitude": lng})
+            self.assertEqual(resp.status_code, 201, (lat, lng, resp.data))
+
+    def test_coordinate_precision_beyond_six_digits_rejected(self):
+        self.client.force_login(self.owner)
+        resp = self.client.post("/api/locations/", {**self.payload, "latitude": "10.1234567"})
+        self.assertEqual(resp.status_code, 400)
+
     def test_only_owner_or_admin_can_modify(self):
         loc = self.make_location()
         url = f"/api/locations/{loc.id}/"
