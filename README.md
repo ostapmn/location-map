@@ -19,7 +19,11 @@ Migrations are applied automatically on start. Settings come from environment va
 ```bash
 docker compose exec web python manage.py createsuperuser   # admin: manages categories
 docker compose exec web python manage.py test              # run the API tests
+docker compose exec web python manage.py seed_demo         # demo data: 30 locations, reviews, votes, views
 ```
+
+`seed_demo` is safe to re-run (it does nothing if the data exists; `--reset` recreates it). It creates users
+`anna`, `oleh`, `iryna`, `taras`, `maria` with the dev-only password `Demo-pass-123`. It never runs automatically.
 
 ## Endpoints
 
